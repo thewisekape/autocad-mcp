@@ -541,6 +541,9 @@ async def system(
       runtime       — Return process/runtime details for spawn diagnostics.
       init          — Re-initialize the backend.
       execute_lisp  — Execute arbitrary AutoLISP code (File IPC only). data: {code}
+      setup_lisp    — Detect AutoCAD version via COM, load mcp_dispatch.lsp for the
+                      current session, and register it permanently in AutoCAD's Startup
+                      Suite via the registry. COM backend only.
     """
     data = data or {}
 
@@ -582,6 +585,10 @@ async def system(
             return _json({"error": "data.code is required"})
         result = await backend.execute_lisp(data["code"])
         return await add_screenshot_if_available(result, include_screenshot)
+    elif operation == "setup_lisp":
+        backend = await get_backend()
+        result = await backend.setup_lisp()
+        return _json(result.to_dict())
     else:
         return _json({"error": f"Unknown system operation: {operation}"})
 

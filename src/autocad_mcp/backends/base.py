@@ -100,6 +100,9 @@ class AutoCADBackend(ABC):
     async def execute_lisp(self, code: str) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
+    async def setup_lisp(self) -> CommandResult:
+        return CommandResult(ok=False, error="Not supported on this backend")
+
     # --- Entity operations ---
 
     async def create_line(self, x1: float, y1: float, x2: float, y2: float, layer: str | None = None) -> CommandResult:

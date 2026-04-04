@@ -526,6 +526,78 @@ class COMBackend(AutoCADBackend):
         except Exception as exc:
             return CommandResult(ok=False, error=f"redo failed: {exc}")
 
+    async def setup_lisp(self) -> CommandResult:
+        """Detect AutoCAD version via COM, load mcp_dispatch.lsp for the
+        current session via SendCommand, and register it permanently in
+        AutoCAD's Startup Suite via the PowerShell registry script."""
+        import os
+        import subprocess
+        import sys
+
+        from autocad_mcp.config import LISP_DIR
+
+        err = self._validate_connection()
+        if err:
+            return err
+
+        # 1. Detect AutoCAD version
+        version = self._safe_get_property(self._app, "Version", "Unknown")
+        full_name = self._safe_get_property(self._app, "FullName", "Unknown")
+        results: dict = {
+            "autocad_version": version,
+            "autocad_path": full_name,
+        }
+
+        # 2. Load LISP into the current AutoCAD session via SendCommand
+        lisp_file = LISP_DIR / "mcp_dispatch.lsp"
+        if not lisp_file.exists():
+            return CommandResult(
+                ok=False,
+                error=f"mcp_dispatch.lsp not found at: {lisp_file}",
+            )
+
+        lisp_path_fwd = str(lisp_file).replace("\\", "/")
+        try:
+            self._doc.SendCommand(f'(load "{lisp_path_fwd}")\n')
+            results["lisp_loaded"] = True
+            results["lisp_path"] = str(lisp_file)
+        except pywintypes.com_error as exc:
+            results["lisp_loaded"] = False
+            results["lisp_load_error"] = f"COM error: {exc}"
+        except Exception as exc:
+            results["lisp_loaded"] = False
+            results["lisp_load_error"] = str(exc)
+
+        # 3. Register permanently via PowerShell (Startup Suite + trusted paths)
+        ps_script = LISP_DIR.parent / "config" / "autoload_lisp.ps1"
+        project_root = str(LISP_DIR.parent)
+
+        if sys.platform == "win32" and ps_script.exists():
+            try:
+                env = {**os.environ, "ACAD_DIR": project_root}
+                proc = subprocess.run(
+                    [
+                        "powershell",
+                        "-ExecutionPolicy", "Bypass",
+                        "-File", str(ps_script),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=env,
+                )
+                output = (proc.stdout + proc.stderr).strip()
+                results["registry_registered"] = proc.returncode == 0
+                results["registry_output"] = output
+            except Exception as exc:
+                results["registry_registered"] = False
+                results["registry_error"] = str(exc)
+        else:
+            results["registry_registered"] = False
+            results["registry_note"] = "PowerShell script not found or not on Windows"
+
+        return CommandResult(ok=True, payload=results)
+
     # ==================================================================
     # Entity creation
     # ==================================================================
