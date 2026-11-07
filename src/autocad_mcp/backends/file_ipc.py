@@ -283,7 +283,14 @@ class FileIPCBackend(AutoCADBackend):
     async def drawing_save(self, path: str | None = None) -> CommandResult:
         return await self._dispatch("drawing-save", {"path": path})
 
-    async def drawing_save_as_dxf(self, path: str) -> CommandResult:
+    async def drawing_save_as_dxf(
+        self, path: str, version: str | None = None,
+    ) -> CommandResult:
+        if version is not None:
+            return CommandResult(ok=False, error="File IPC does not support selecting a DXF version")
+        destination = Path(path)
+        if destination.suffix.lower() != ".dxf" or destination.exists():
+            return CommandResult(ok=False, error="Choose a new destination with a .dxf extension")
         return await self._dispatch("drawing-save-as-dxf", {"path": path})
 
     async def drawing_create(self, name: str | None = None) -> CommandResult:

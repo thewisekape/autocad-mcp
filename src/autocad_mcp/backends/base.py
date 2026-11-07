@@ -69,7 +69,7 @@ class AutoCADBackend(ABC):
     async def drawing_save(self, path: str | None = None) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
-    async def drawing_save_as_dxf(self, path: str) -> CommandResult:
+    async def drawing_save_as_dxf(self, path: str, version: str | None = None) -> CommandResult:
         return CommandResult(ok=False, error="Not supported on this backend")
 
     async def drawing_create(self, name: str | None = None) -> CommandResult:
@@ -285,6 +285,11 @@ class AutoCADBackend(ABC):
         return CommandResult(ok=False, error="Not supported on this backend")
 
     # --- Query operations ---
+
+    async def query_tables(
+        self, layout: str | None = None, entity_id: str | None = None,
+    ) -> CommandResult:
+        return CommandResult(ok=False, error="Native table cells require the AutoCAD COM backend")
 
     async def query_entity_properties(self, entity_id: str) -> CommandResult:
         """Get ALL properties of an entity: type, layer, color, linetype, lineweight, and type-specific geometry data."""

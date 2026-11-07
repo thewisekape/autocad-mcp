@@ -17,6 +17,7 @@ from autocad_mcp.client import (
     add_screenshot_if_available,
     get_backend,
 )
+from autocad_mcp.data_router import data_capabilities, read_cad_data
 
 # FastMCP validates return types via Pydantic. Tools that may return
 # ImageContent (screenshot) alongside TextContent need a union return type.
@@ -46,7 +47,7 @@ async def drawing(
       open       — Open an existing drawing. data: {path}
       info       — Get drawing extents, entity count, layers, blocks.
       save       — Save current drawing. data: {path?} (saves to path if given, else QSAVE)
-      save_as_dxf — Export as DXF. data: {path}
+      save_as_dxf — Export as DXF. data: {path, version?} (AutoCAD COM defaults to R2013)
       plot_pdf   — Plot to PDF. data: {path}
       purge      — Purge unused objects.
       get_variables — Get system variables. data: {names: [...]}
@@ -67,7 +68,12 @@ async def drawing(
     elif operation == "save":
         result = await backend.drawing_save(data.get("path"))
     elif operation == "save_as_dxf":
-        result = await backend.drawing_save_as_dxf(data["path"])
+        if "version" in data:
+            result = await backend.drawing_save_as_dxf(data["path"], version=data["version"])
+        else:
+            result = await backend.drawing_save_as_dxf(data["path"])
+        if not result.ok and result.payload:
+            return _json({**result.to_dict(), **result.payload})
     elif operation == "plot_pdf":
         result = await backend.drawing_plot_pdf(data["path"])
     elif operation == "purge":
@@ -538,6 +544,7 @@ async def system(
       status        — Backend info, capabilities, health check.
       health        — Quick health check (ping backend).
       get_backend   — Return current backend name and capabilities.
+      data_capabilities — List backend coverage and fallback for CAD data reads.
       runtime       — Return process/runtime details for spawn diagnostics.
       init          — Re-initialize the backend.
       execute_lisp  — Execute arbitrary AutoLISP code (File IPC only). data: {code}
@@ -551,6 +558,8 @@ async def system(
         backend = await get_backend()
         result = await backend.status()
         return await add_screenshot_if_available(result, include_screenshot)
+    elif operation == "data_capabilities":
+        return _json({"ok": True, "payload": data_capabilities()})
     elif operation == "health":
         try:
             backend = await get_backend()
@@ -618,6 +627,8 @@ async def query(
       dimension_styles  — List all dimension styles.
       linetypes         — List all linetypes.
       block_tree        — Hierarchical block/nested block tree.
+      tables            — Native table data (COM). data: {layout?, entity_id?}
+      view_regions      — Candidate DXF views on a frame layer. data: {frame_layer, layout?}
       drawing_metadata  — Drawing metadata (author, dates, custom properties).
     """
     data = data or {}
@@ -632,7 +643,7 @@ async def query(
         eid = entity_id or data.get("entity_id")
         if not eid:
             return _json({"error": "entity_id is required"})
-        result = await backend.query_entity_geometry(eid)
+        result = await read_cad_data(backend, "query.entity_geometry", eid)
     elif operation == "drawing_summary":
         result = await backend.query_drawing_summary()
     elif operation == "layer_summary":
@@ -647,7 +658,18 @@ async def query(
     elif operation == "linetypes":
         result = await backend.query_linetypes()
     elif operation == "block_tree":
-        result = await backend.query_block_tree()
+        result = await read_cad_data(backend, "query.block_tree")
+    elif operation == "tables":
+        result = await read_cad_data(
+            backend, "query.tables", layout=data.get("layout"),
+            entity_id=entity_id or data.get("entity_id"),
+        )
+    elif operation == "view_regions":
+        if not data.get("frame_layer"):
+            return _json({"error": "data.frame_layer is required"})
+        result = await read_cad_data(
+            backend, "query.view_regions", data["frame_layer"], layout=data.get("layout"),
+        )
     elif operation == "drawing_metadata":
         result = await backend.query_drawing_metadata()
     else:
@@ -674,7 +696,12 @@ async def search(
       text             — Find TEXT/MTEXT containing pattern. data: {pattern, case_sensitive?}
       by_attribute     — Find INSERTs with matching attribute. data: {tag?, value?}
       by_window        — Find entities within rectangle. data: {x1, y1, x2, y2}
+                         ezdxf options: {mode?, entity_type?, layer?, layout?}. Tests XY boxes
+                         with inclusive boundaries: contains (default) or intersects.
       by_proximity     — Find entities near a point. data: {x, y, radius}
+                         ezdxf options: {metric?, entity_type?, layer?, layout?}.
+                         XY distance to bbox_center (default) or bbox_nearest (zero inside).
+                         ezdxf searches top-level entities in Model unless a layout is selected.
       by_type_and_layer — Filter by type/layer/color. data: {entity_type?, layer?, color?}
       by_block_name    — Find block insertions by name. data: {block_name}
       by_handle_list   — Get entities by handle list. data: {handles: [...]}
@@ -710,15 +737,23 @@ async def search(
         for key in ("x1", "y1", "x2", "y2"):
             if key not in data:
                 return _json({"error": f"data.{key} is required"})
-        result = await backend.search_by_window(
-            data["x1"], data["y1"], data["x2"], data["y2"],
+        options = {key: data[key] for key in ("mode", "entity_type", "layer", "layout") if key in data}
+        if options and backend.name != "ezdxf":
+            return _json({"error": "Extended window options require the ezdxf backend"})
+        result = await read_cad_data(
+            backend, "search.by_window",
+            data["x1"], data["y1"], data["x2"], data["y2"], **options,
         )
     elif operation == "by_proximity":
         for key in ("x", "y", "radius"):
             if key not in data:
                 return _json({"error": f"data.{key} is required"})
-        result = await backend.search_by_proximity(
-            data["x"], data["y"], data["radius"],
+        options = {key: data[key] for key in ("metric", "entity_type", "layer", "layout") if key in data}
+        if options and backend.name != "ezdxf":
+            return _json({"error": "Extended proximity options require the ezdxf backend"})
+        result = await read_cad_data(
+            backend, "search.by_proximity",
+            data["x"], data["y"], data["radius"], **options,
         )
     elif operation == "by_type_and_layer":
         result = await backend.search_by_type_and_layer(
@@ -806,6 +841,7 @@ async def geometry(
       length         — Total length of line/polyline/arc/circle. entity_id required.
       area           — Area of closed polyline/circle/ellipse. entity_id required.
       bounding_box   — Axis-aligned bounding box. entity_id or data: {layer?}
+                       ezdxf options: {entity_type?, layout?}. Layout queries use top-level entities.
       polyline_info  — Vertices, bulges, segment lengths, total length, area. entity_id required.
     """
     data = data or {}
@@ -831,7 +867,10 @@ async def geometry(
     elif operation == "bounding_box":
         eid = entity_id or data.get("entity_id")
         lyr = data.get("layer")
-        result = await backend.geometry_bounding_box(eid, lyr)
+        options = {key: data[key] for key in ("entity_type", "layout") if key in data}
+        if options and backend.name != "ezdxf":
+            return _json({"error": "Extended bounding box options require the ezdxf backend"})
+        result = await read_cad_data(backend, "geometry.bounding_box", eid, lyr, **options)
     elif operation == "polyline_info":
         eid = entity_id or data.get("entity_id")
         if not eid:

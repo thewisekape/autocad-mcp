@@ -10,7 +10,11 @@ from typing import Any
 import ezdxf
 import structlog
 
+from autocad_mcp.backends import dxf_spatial, dxf_view_regions
+from autocad_mcp.backends.annotation_data import extract_dxf_annotation
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
+from autocad_mcp.backends.ezdxf_blocks import extract_block_tree
+from autocad_mcp.backends.ezdxf_geometry import extend_entity_geometry
 from autocad_mcp.screenshot import MatplotlibScreenshotProvider
 
 log = structlog.get_logger()
@@ -101,7 +105,20 @@ class EzdxfBackend(AutoCADBackend):
         self._save_path = save_path
         return CommandResult(ok=True, payload={"path": save_path})
 
-    async def drawing_save_as_dxf(self, path: str) -> CommandResult:
+    async def drawing_save_as_dxf(
+        self, path: str, version: str | None = None,
+    ) -> CommandResult:
+        if not self._doc:
+            return CommandResult(ok=False, error="No document open")
+        if version is not None:
+            from ezdxf.lldxf.const import acad_release_to_dxf_version
+
+            requested = version.strip().upper()
+            if acad_release_to_dxf_version.get(requested, requested) != self._doc.dxfversion:
+                return CommandResult(ok=False, error="ezdxf exports the current DXF version; use AutoCAD for conversion")
+        destination = Path(path)
+        if destination.suffix.lower() != ".dxf" or destination.exists():
+            return CommandResult(ok=False, error="Choose a new destination with a .dxf extension")
         return await self.drawing_save(path)
 
     async def drawing_create(self, name: str | None = None) -> CommandResult:
@@ -899,6 +916,19 @@ class EzdxfBackend(AutoCADBackend):
                 except Exception:
                     geom["vertices"] = []
                 geom["dimstyle"] = e.dxf.get("dimstyle", "Standard")
+            elif dtype == "HATCH":
+                geom.update({
+                    "pattern_name": e.dxf.pattern_name,
+                    "pattern_angle": e.dxf.pattern_angle,
+                    "pattern_scale": e.dxf.pattern_scale,
+                    "solid_fill": bool(e.dxf.solid_fill),
+                    "associative": bool(e.dxf.associative),
+                    "boundary_count": len(e.paths),
+                    "elevation_ocs": list(e.dxf.elevation),
+                    "extrusion": list(e.dxf.extrusion),
+                })
+            elif dtype == "ACAD_TABLE":
+                geom["warnings"] = ["Full native TABLE cell data requires query.tables on AutoCAD COM"]
             elif dtype == "DIMENSION":
                 for attr in ("dimstyle", "defpoint", "defpoint2", "defpoint3",
                              "text_midpoint", "dimtype", "actual_measurement"):
@@ -908,6 +938,8 @@ class EzdxfBackend(AutoCADBackend):
             else:
                 geom["info"] = f"Geometry extraction not implemented for {dtype}"
 
+            extend_entity_geometry(e, geom, self._segment_length)
+            geom.update(extract_dxf_annotation(e, owner_space=geom.get("coordinates", {}).get("owner_space")))
             return CommandResult(ok=True, payload=geom)
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
@@ -1064,69 +1096,40 @@ class EzdxfBackend(AutoCADBackend):
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
 
-    async def search_by_window(self, x1, y1, x2, y2) -> CommandResult:
+    async def query_view_regions(self, frame_layer, *, layout=None) -> CommandResult:
         if not self._doc:
             return CommandResult(ok=False, error="No document open")
         try:
-            from ezdxf import bbox
-            min_x, max_x = min(x1, x2), max(x1, x2)
-            min_y, max_y = min(y1, y2), max(y1, y2)
-            results = []
-            for e in self._msp:
-                try:
-                    box = bbox.extents([e])
-                    if not box.has_data:
-                        continue
-                    emin = box.extmin
-                    emax = box.extmax
-                    # Entity fully inside window
-                    if emin[0] >= min_x and emin[1] >= min_y and emax[0] <= max_x and emax[1] <= max_y:
-                        entry = {
-                            "handle": e.dxf.handle,
-                            "type": e.dxftype(),
-                            "layer": e.dxf.get("layer", "0"),
-                            "bbox_min": [emin[0], emin[1]],
-                            "bbox_max": [emax[0], emax[1]],
-                        }
-                        results.append(entry)
-                except Exception:
-                    continue
-            return CommandResult(ok=True, payload={"matches": results, "count": len(results)})
-        except Exception as ex:
-            return CommandResult(ok=False, error=str(ex))
+            payload = dxf_view_regions.view_regions(self._doc, frame_layer, layout=layout)
+            return CommandResult(ok=True, payload=payload)
+        except ValueError as exc:
+            return CommandResult(ok=False, error=str(exc))
 
-    async def search_by_proximity(self, x, y, radius) -> CommandResult:
+    async def search_by_window(
+        self, x1, y1, x2, y2, *, mode="contains", entity_type=None, layer=None, layout=None
+    ) -> CommandResult:
         if not self._doc:
             return CommandResult(ok=False, error="No document open")
         try:
-            from ezdxf import bbox
-            results = []
-            for e in self._msp:
-                try:
-                    box = bbox.extents([e])
-                    if not box.has_data:
-                        continue
-                    # Use center of bounding box as entity reference point
-                    emin = box.extmin
-                    emax = box.extmax
-                    cx = (emin[0] + emax[0]) / 2
-                    cy = (emin[1] + emax[1]) / 2
-                    dist = math.sqrt((cx - x) ** 2 + (cy - y) ** 2)
-                    if dist <= radius:
-                        results.append({
-                            "handle": e.dxf.handle,
-                            "type": e.dxftype(),
-                            "layer": e.dxf.get("layer", "0"),
-                            "distance": round(dist, 6),
-                            "center": [round(cx, 6), round(cy, 6)],
-                        })
-                except Exception:
-                    continue
-            # Sort by distance
-            results.sort(key=lambda r: r["distance"])
-            return CommandResult(ok=True, payload={"matches": results, "count": len(results)})
-        except Exception as ex:
-            return CommandResult(ok=False, error=str(ex))
+            payload = dxf_spatial.window_query(
+                self._doc, x1, y1, x2, y2, mode=mode, entity_type=entity_type, layer=layer, layout=layout
+            )
+            return CommandResult(ok=True, payload=payload)
+        except ValueError as exc:
+            return CommandResult(ok=False, error=str(exc))
+
+    async def search_by_proximity(
+        self, x, y, radius, *, metric="bbox_center", entity_type=None, layer=None, layout=None
+    ) -> CommandResult:
+        if not self._doc:
+            return CommandResult(ok=False, error="No document open")
+        try:
+            payload = dxf_spatial.proximity_query(
+                self._doc, x, y, radius, metric=metric, entity_type=entity_type, layer=layer, layout=layout
+            )
+            return CommandResult(ok=True, payload=payload)
+        except ValueError as exc:
+            return CommandResult(ok=False, error=str(exc))
 
     async def search_by_type_and_layer(self, entity_type=None, layer=None, color=None) -> CommandResult:
         if not self._doc:
@@ -1278,35 +1281,14 @@ class EzdxfBackend(AutoCADBackend):
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
 
-    async def geometry_bounding_box(self, entity_id=None, layer=None) -> CommandResult:
+    async def geometry_bounding_box(self, entity_id=None, layer=None, *, entity_type=None, layout=None) -> CommandResult:
         if not self._doc:
             return CommandResult(ok=False, error="No document open")
         try:
-            from ezdxf import bbox
-            if entity_id:
-                e = self._doc.entitydb.get(entity_id)
-                if e is None:
-                    return CommandResult(ok=False, error=f"Entity {entity_id} not found")
-                box = bbox.extents([e])
-            elif layer:
-                entities = [e for e in self._msp if e.dxf.get("layer", "0") == layer]
-                if not entities:
-                    return CommandResult(ok=False, error=f"No entities on layer '{layer}'")
-                box = bbox.extents(entities)
-            else:
-                box = bbox.extents(self._msp)
-
-            if not box.has_data:
-                return CommandResult(ok=False, error="No bounding box data available")
-
-            return CommandResult(ok=True, payload={
-                "min": list(box.extmin),
-                "max": list(box.extmax),
-                "width": round(box.extmax[0] - box.extmin[0], 10),
-                "height": round(box.extmax[1] - box.extmin[1], 10),
-            })
-        except Exception as ex:
-            return CommandResult(ok=False, error=str(ex))
+            payload = dxf_spatial.bounding_box(self._doc, entity_id, layer, entity_type=entity_type, layout=layout)
+            return CommandResult(ok=True, payload=payload)
+        except ValueError as exc:
+            return CommandResult(ok=False, error=str(exc))
 
     async def geometry_polyline_info(self, entity_id) -> CommandResult:
         try:
@@ -2082,20 +2064,7 @@ class EzdxfBackend(AutoCADBackend):
         if not self._doc:
             return CommandResult(ok=False, error="No document open")
         try:
-            blocks = []
-            for block in self._doc.blocks:
-                try:
-                    is_xref = block.block.is_xref or block.block.is_xref_overlay
-                except (AttributeError, Exception):
-                    is_xref = False
-                is_anonymous = block.name.startswith("*")
-                entry = {"name": block.name, "is_xref": is_xref, "is_anonymous": is_anonymous, "entity_count": len(block)}
-                if hasattr(block, 'attdefs'):
-                    attdefs = [{"tag": ad.dxf.tag, "prompt": ad.dxf.get("prompt", "")} for ad in block.attdefs() if hasattr(ad.dxf, 'tag')]
-                    if attdefs:
-                        entry["attribute_definitions"] = attdefs
-                blocks.append(entry)
-            return CommandResult(ok=True, payload={"blocks": blocks})
+            return CommandResult(ok=True, payload=extract_block_tree(self._doc, self._doc.filename))
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
 

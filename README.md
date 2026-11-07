@@ -10,19 +10,19 @@ A unified MCP (Model Context Protocol) server for AutoCAD that combines three ba
 | **COM** | Windows COM automation | AutoCAD 2018+ / ZWCAD / GstarCAD / BricsCAD | Yes | Windows |
 | **ezdxf** | Headless DXF generation | None (pure Python) | N/A | Any |
 
-## 22 MCP Tools
+## 23 MCP Tools
 
 | # | Tool | Operations | Description |
 |---|------|-----------|-------------|
-| 1 | `drawing` | create, open, save, info, purge, plot_pdf, undo, redo, audit, units, limits, wblock | File/drawing management |
+| 1 | `drawing` | create, open, save, save_as_dxf, info, purge, plot_pdf, undo, redo, audit, units, limits, wblock | File/drawing management |
 | 2 | `entity` | create_line/circle/polyline/rectangle/arc/ellipse/mtext/hatch, list, count, get, copy, move, rotate, scale, mirror, offset, array, fillet, chamfer, erase, explode, join, extend, trim, break_at | Entity CRUD + modification |
 | 3 | `layer` | list, create, set_current, set_properties, freeze, thaw, lock, unlock | Layer management |
 | 4 | `block` | list, insert, insert_with_attributes, get_attributes, update_attribute, define | Block operations |
 | 5 | `annotation` | create_text, create_dimension_linear/aligned/angular/radius, create_leader | Text, dimensions, leaders |
 | 6 | `pid` | setup_layers, insert_symbol, list_symbols, draw_process_line, connect_equipment, insert_valve/instrument/pump/tank | P&ID engineering |
 | 7 | `view` | zoom_extents, zoom_window, zoom_center, pan, zoom_scale, screenshot, layer_visibility | Viewport control |
-| 8 | `system` | status, health, runtime, init, execute_lisp | Server management |
-| 9 | `query` | entity_properties, entity_geometry, drawing_summary, layer_summary, text_styles, dimension_styles, linetypes, block_tree, drawing_metadata | Read-only queries |
+| 8 | `system` | status, health, runtime, init, execute_lisp, data_capabilities | Server management |
+| 9 | `query` | entity_properties, entity_geometry, drawing_summary, layer_summary, text_styles, dimension_styles, linetypes, block_tree, drawing_metadata, tables, view_regions | Read-only queries |
 | 10 | `search` | text, by_attribute, by_window, by_proximity, by_type_and_layer, by_block_name, by_handle_list, equipment_find, equipment_inspect, find_text, batch_find_and_tag | Find operations |
 | 11 | `geometry` | distance, length, area, bounding_box, polyline_info | Measurements |
 | 12 | `select` | filter, bulk_move, bulk_copy, bulk_erase, bulk_set_property, find_replace_text, find_replace_attribute, layer_rename, layer_merge | Bulk operations |
@@ -36,6 +36,7 @@ A unified MCP (Model Context Protocol) server for AutoCAD that combines three ba
 | 20 | `batch` | draw_lines, draw_circles, draw_rectangles, draw_polylines, draw_texts | Batch drawing (60-70% fewer API calls) |
 | 21 | `nlp` | parse + execute natural language commands | Natural language CAD commands (EN/SV) |
 | 22 | `excel_export` | full_export, selected_export | Export to Excel spreadsheets |
+| 23 | `magicad` | status, list_commands, run, update_drawing, project_info, and other MagiCAD operations | MEP integration |
 
 ## Quick Start
 
@@ -95,6 +96,8 @@ For AutoCAD LT, load the LISP dispatcher:
 3. The MCP server will automatically detect the running AutoCAD instance
 
 ## Architecture
+
+For CAD data extraction, see the [backend compatibility matrix and validation guide](docs/cad-data.md).
 
 ```
 MCP Client (Claude Desktop, Claude Code, Cursor, etc.)

@@ -20,7 +20,10 @@ from typing import Any
 
 import structlog
 
+from autocad_mcp.backends.annotation_data import extract_com_annotation
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
+from autocad_mcp.backends.dxf_export import export_saved_dwg
+from autocad_mcp.backends.native_tables import read_table
 from autocad_mcp.config import get_cad_config, get_supported_cads
 
 log = structlog.get_logger()
@@ -398,16 +401,19 @@ class COMBackend(AutoCADBackend):
         except Exception as exc:
             return CommandResult(ok=False, error=f"drawing_save failed: {exc}")
 
-    async def drawing_save_as_dxf(self, path: str) -> CommandResult:
+    async def drawing_save_as_dxf(
+        self, path: str, version: str | None = None,
+    ) -> CommandResult:
         err = self._validate_connection()
         if err:
             return err
+        if self._cad_type != "autocad":
+            return CommandResult(ok=False, error="Verified DXF export requires Autodesk AutoCAD")
         try:
-            # acR12_dxf = 1
-            self._doc.SaveAs(path, 1)
-            return CommandResult(ok=True, payload={"saved_dxf": path})
-        except pywintypes.com_error as exc:
-            return CommandResult(ok=False, error=f"drawing_save_as_dxf COM error: {exc}")
+            payload = export_saved_dwg(self._doc, self._app, path, "R2013" if version is None else version)
+            if payload["validation"]["status"] == "failed":
+                return CommandResult(ok=False, payload=payload, error="DXF export failed validation")
+            return CommandResult(ok=True, payload=payload)
         except Exception as exc:
             return CommandResult(ok=False, error=f"drawing_save_as_dxf failed: {exc}")
 
@@ -1501,6 +1507,45 @@ class COMBackend(AutoCADBackend):
     # Query operations
     # ==================================================================
 
+    @staticmethod
+    def _read_table_merge(table: Any, row: int, col: int) -> tuple[int, int, int, int] | None:
+        # Dynamic dispatch requires explicit by-reference arguments.
+        table = win32com.client.dynamic.DumbDispatch(table._oleobj_)
+        outputs = [win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0) for _ in range(4)]
+        if not table.IsMergedCell(row, col, *outputs):
+            return None
+        min_row, max_row, min_col, max_col = (arg.value for arg in outputs)
+        if not (min_row <= row <= max_row and min_col <= col <= max_col):
+            raise ValueError("Table merge bounds do not contain the cell")
+        if min_row == max_row and min_col == max_col:
+            raise ValueError("Table merge does not span more than one cell")
+        return min_row, max_row, min_col, max_col
+
+    async def query_tables(
+        self, layout: str | None = None, entity_id: str | None = None,
+    ) -> CommandResult:
+        err = self._validate_connection()
+        if err:
+            return err
+        try:
+            source_file = self._doc.FullName
+            layouts = [item for item in self._doc.Layouts if layout is None or item.Name.casefold() == layout.casefold()]
+            if not layouts:
+                return CommandResult(ok=False, error=f"Layout not found: {layout}")
+            tables = []
+            for item in layouts:
+                for entity in item.Block:
+                    if entity.ObjectName != "AcDbTable":
+                        continue
+                    if entity_id is not None and entity.Handle.upper() != entity_id.upper():
+                        continue
+                    tables.append(read_table(entity, item.Name, source_file, self._read_table_merge))
+            if entity_id is not None and not tables:
+                return CommandResult(ok=False, error=f"Table not found: {entity_id}")
+            return CommandResult(ok=True, payload={"tables": tables, "count": len(tables)})
+        except Exception as exc:
+            return CommandResult(ok=False, error=f"query_tables failed: {exc}")
+
     async def query_entity_properties(self, entity_id: str) -> CommandResult:
         """Full property dump for an entity."""
         err = self._validate_connection()
@@ -1550,6 +1595,7 @@ class COMBackend(AutoCADBackend):
             except Exception:
                 pass
 
+            props.update(extract_com_annotation(ent))
             return CommandResult(ok=True, payload=props)
         except pywintypes.com_error as exc:
             return CommandResult(ok=False, error=f"query_entity_properties COM error: {exc}")
