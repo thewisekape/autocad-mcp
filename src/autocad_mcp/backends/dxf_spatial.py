@@ -30,6 +30,26 @@ def layout_entities(doc, layout_name=None):
 class SpatialScan:
     """Track entities that could not be evaluated, including partial results."""
 
+    box_method = "ezdxf_extents"
+    iter_layout = staticmethod(layout_entities)
+
+    @staticmethod
+    def find_entity(doc, handle):
+        return doc.entitydb.get(handle)
+
+    @staticmethod
+    def metadata(entity):
+        layer = entity.dxf.get("layer", "0") if entity.dxf.is_supported("layer") else None
+        return entity.dxf.handle, entity.dxftype(), layer
+
+    @staticmethod
+    def extents(entity):
+        return bbox.extents([entity])
+
+    @staticmethod
+    def is_retryable(error):
+        return False
+
     def __init__(self):
         self.box_count = 0
         self.skipped_count = 0
@@ -41,19 +61,20 @@ class SpatialScan:
                 raise ValueError(f"{name} must be a nonempty string")
 
         for entity, layout in entities:
-            kind = entity.dxftype()
+            handle, kind, entity_layer = self.metadata(entity)
             if entity_type is not None and kind.casefold() != entity_type.casefold():
                 continue
-            entity_layer = entity.dxf.get("layer", "0") if entity.dxf.is_supported("layer") else None
             if layer is not None and (entity_layer is None or entity_layer.casefold() != layer.casefold()):
                 continue
-            entry = {"handle": entity.dxf.handle, "type": kind, "layer": entity_layer, "layout": layout}
+            entry = {"handle": handle, "type": kind, "layer": entity_layer, "layout": layout}
             try:
-                box = bbox.extents([entity])
+                box = self.extents(entity)
                 if not box.has_data or not all(math.isfinite(v) for v in (*box.extmin, *box.extmax)):
                     self._skip(entry, "No finite bounding box available")
                     continue
             except Exception as exc:
+                if self.is_retryable(exc):
+                    raise
                 self._skip(entry, f"{type(exc).__name__}: {exc}")
                 continue
             self.box_count += 1
@@ -72,7 +93,7 @@ class SpatialScan:
                 f"first issue for {first['type']} {first['handle']}: {first['reason']}"
             )
         return {
-            "box_method": "ezdxf_extents",
+            "box_method": self.box_method,
             "candidate_scope": "top_level_layout",
             "status": "partial" if self.skipped_count else "complete",
             "evaluated_count": self.box_count,
@@ -81,15 +102,15 @@ class SpatialScan:
         }
 
 
-def window_query(doc, x1, y1, x2, y2, *, mode="contains", entity_type=None, layer=None, layout=None):
+def window_query(doc, x1, y1, x2, y2, *, mode="contains", entity_type=None, layer=None, layout=None, scan=None):
     validate_coordinates(x1=x1, y1=y1, x2=x2, y2=y2)
     if mode not in ("contains", "intersects"):
         raise ValueError("mode must be 'contains' or 'intersects'")
     min_x, max_x = sorted((x1, x2))
     min_y, max_y = sorted((y1, y2))
-    scan = SpatialScan()
+    scan = scan or SpatialScan()
     matches = []
-    for entry, box in scan.boxes(layout_entities(doc, layout), entity_type, layer):
+    for entry, box in scan.boxes(scan.iter_layout(doc, layout), entity_type, layer):
         left, bottom = box.extmin.x, box.extmin.y
         right, top = box.extmax.x, box.extmax.y
         if mode == "contains":
@@ -101,15 +122,15 @@ def window_query(doc, x1, y1, x2, y2, *, mode="contains", entity_type=None, laye
     return {"matches": matches, "count": len(matches), "mode": mode, "diagnostics": scan.diagnostics()}
 
 
-def proximity_query(doc, x, y, radius, *, metric="bbox_center", entity_type=None, layer=None, layout=None):
+def proximity_query(doc, x, y, radius, *, metric="bbox_center", entity_type=None, layer=None, layout=None, scan=None):
     validate_coordinates(x=x, y=y, radius=radius)
     if radius < 0:
         raise ValueError("radius must be non-negative")
     if metric not in ("bbox_center", "bbox_nearest"):
         raise ValueError("metric must be 'bbox_center' or 'bbox_nearest'")
-    scan = SpatialScan()
+    scan = scan or SpatialScan()
     matches = []
-    for entry, box in scan.boxes(layout_entities(doc, layout), entity_type, layer):
+    for entry, box in scan.boxes(scan.iter_layout(doc, layout), entity_type, layer):
         center = box.center
         if metric == "bbox_center":
             distance = math.hypot(center.x - x, center.y - y)
@@ -123,20 +144,20 @@ def proximity_query(doc, x, y, radius, *, metric="bbox_center", entity_type=None
     return {"matches": matches, "count": len(matches), "metric": metric, "diagnostics": scan.diagnostics()}
 
 
-def bounding_box(doc, entity_id=None, layer=None, *, entity_type=None, layout=None):
+def bounding_box(doc, entity_id=None, layer=None, *, entity_type=None, layout=None, scan=None):
+    scan = scan or SpatialScan()
     if entity_id and layout is None:
-        entity = doc.entitydb.get(entity_id)
+        entity = scan.find_entity(doc, entity_id)
         if entity is None:
             raise ValueError(f"Entity {entity_id} not found")
         entities = [(entity, None)]
         # A handle took precedence over the layer argument in the original API.
         layer = None
     else:
-        entities = layout_entities(doc, layout)
+        entities = scan.iter_layout(doc, layout)
         if entity_id:
-            entities = ((entity, name) for entity, name in entities if entity.dxf.handle == entity_id)
+            entities = ((entity, name) for entity, name in entities if scan.metadata(entity)[0] == entity_id)
 
-    scan = SpatialScan()
     box = BoundingBox()
     for _, entity_box in scan.boxes(entities, entity_type, layer):
         box.extend(entity_box)

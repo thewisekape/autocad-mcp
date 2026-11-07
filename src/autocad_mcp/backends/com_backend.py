@@ -20,6 +20,7 @@ from typing import Any
 
 import structlog
 
+from autocad_mcp.backends import com_spatial, dxf_spatial
 from autocad_mcp.backends.annotation_data import extract_com_annotation
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
 from autocad_mcp.backends.dxf_export import export_saved_dwg
@@ -1636,6 +1637,15 @@ class COMBackend(AutoCADBackend):
     # ==================================================================
     # Search operations
     # ==================================================================
+
+    async def search_by_window(self, x1, y1, x2, y2, **options) -> CommandResult:
+        return await com_spatial.run_spatial(self._app, self._doc, dxf_spatial.window_query, x1, y1, x2, y2, **options)
+
+    async def search_by_proximity(self, x, y, radius, **options) -> CommandResult:
+        return await com_spatial.run_spatial(self._app, self._doc, dxf_spatial.proximity_query, x, y, radius, **options)
+
+    async def geometry_bounding_box(self, entity_id=None, layer=None, **options) -> CommandResult:
+        return await com_spatial.run_spatial(self._app, self._doc, dxf_spatial.bounding_box, entity_id, layer, **options)
 
     async def search_text(
         self, pattern: str, case_sensitive: bool = False

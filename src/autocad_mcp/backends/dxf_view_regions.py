@@ -6,6 +6,8 @@ import math
 import re
 from itertools import pairwise
 
+from ezdxf import bbox
+
 from autocad_mcp.backends.dxf_spatial import SpatialScan, layout_entities
 
 
@@ -13,13 +15,20 @@ _TITLE_TYPES = {
     "plan": "plan",
     "plan view": "plan",
     "平面图": "plan",
+    "俯视图": "plan",
     "elevation": "elevation",
     "elevation view": "elevation",
     "立面图": "elevation",
+    "正视图": "elevation",
+    "侧视图": "elevation",
     "section": "section",
     "section view": "section",
     "剖面图": "section",
+    "剖视图": "section",
 }
+
+_FRAME_NAME = re.compile(r"图框|(?:^|[^a-z])(?:title[ _-]*block|sheet[ _-]*(?:frame|border)|drawing[ _-]*border)(?:$|[^a-z])", re.I)
+_TITLE_SUFFIX = re.compile(r"(平面图|俯视图|立面图|正视图|侧视图|剖面图|剖视图)$")
 
 
 def _frame_bounds(entity):
@@ -65,27 +74,52 @@ def _title(entity):
         return None
     text = entity.plain_text()
     normalized = re.sub(r"\s+", " ", text).strip().casefold()
-    if normalized in _TITLE_TYPES:
-        return {"handle": entity.dxf.handle, "text": text, "view_type": _TITLE_TYPES[normalized]}
+    title_type = _TITLE_TYPES.get(normalized)
+    if not title_type and len(normalized) <= 40 and "\n" not in text:
+        match = _TITLE_SUFFIX.search(normalized)
+        if match:
+            title_type = _TITLE_TYPES[match.group()]
+    if title_type:
+        return {"handle": entity.dxf.handle, "text": text, "view_type": title_type}
     return None
 
 
-def view_regions(doc, frame_layer, *, layout=None):
+def _named_frame(entity):
+    if entity.dxftype() != "INSERT" or not _FRAME_NAME.search(entity.dxf.name):
+        return None
+    box = bbox.extents([entity])
+    if not box.has_data:
+        return None
+    bounds = (box.extmin.x, box.extmin.y, box.extmax.x, box.extmax.y)
+    if all(math.isfinite(value) for value in bounds) and bounds[0] < bounds[2] and bounds[1] < bounds[3]:
+        return bounds
+    return None
+
+
+def view_regions(doc, frame_layer=None, *, layout=None):
     """Group top-level entities by frame bounds and infer type from explicit titles."""
-    if not isinstance(frame_layer, str) or not frame_layer:
+    if frame_layer is not None and (not isinstance(frame_layer, str) or not frame_layer):
         raise ValueError("frame_layer must be a nonempty layer name")
     entities = list(layout_entities(doc, layout))
     frames = {}
+    frame_layers = {}
+    evidence = "named_frame_reference" if frame_layer is None else "explicit_frame_layer"
     for entity, name in entities:
-        if entity.dxftype() == "LWPOLYLINE" and entity.dxf.layer.casefold() == frame_layer.casefold():
+        if frame_layer is None:
+            bounds = _named_frame(entity)
+        elif entity.dxftype() == "LWPOLYLINE" and entity.dxf.layer.casefold() == frame_layer.casefold():
             bounds = _frame_bounds(entity)
-            if bounds:
-                frames[entity.dxf.handle] = (bounds, name)
+        else:
+            continue
+        if bounds:
+            frames[entity.dxf.handle] = (bounds, name)
+            frame_layers[entity.dxf.handle] = entity.dxf.layer
 
     regions = {
         handle: {
             "frame_handle": handle,
-            "frame_layer": frame_layer,
+            "frame_layer": frame_layers[handle],
+            "frame_evidence": evidence,
             "layout": name,
             "bbox_min": list(bounds[:2]),
             "bbox_max": list(bounds[2:]),
@@ -130,8 +164,9 @@ def view_regions(doc, frame_layer, *, layout=None):
         title_types = {title["view_type"] for title in region["titles"]}
         if len(title_types) == 1:
             region["view_type"] = next(iter(title_types))
-        region["ambiguous"] = (
-            len(title_types) > 1 or bool(region["overlapping_frames"])
-            or any(member["ambiguous"] for member in region["members"])
+        region["classification_ambiguous"] = len(title_types) > 1
+        region["boundary_ambiguous"] = bool(region["overlapping_frames"]) or any(
+            member["ambiguous"] for member in region["members"]
         )
+        region["ambiguous"] = region["classification_ambiguous"] or region["boundary_ambiguous"]
     return {"regions": list(regions.values()), "count": len(regions), "diagnostics": scan.diagnostics()}

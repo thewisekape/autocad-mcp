@@ -25,6 +25,7 @@ VERSION_ALIASES = {"R2013": "AC1027", "R2018": "AC1032"}
 COM_TYPES = {
     "AcDbArc": "ARC",
     "AcDbBlockReference": "INSERT",
+    "AcDbMInsertBlock": "INSERT",
     "AcDbCircle": "CIRCLE",
     "AcDbEllipse": "ELLIPSE",
     "AcDbHatch": "HATCH",
@@ -39,12 +40,21 @@ COM_TYPES = {
     "AcDbSpline": "SPLINE",
     "AcDbTable": "ACAD_TABLE",
     "AcDbText": "TEXT",
+    "AcDbRegion": "REGION",
+    "AcDbWipeout": "WIPEOUT",
+    "AcDbViewport": "VIEWPORT",
 }
 
 
 def canonical_version(version: str) -> str:
     version = version.upper().strip()
     return VERSION_ALIASES.get(version, version)
+
+
+def com_entity_type(object_name: str) -> str | None:
+    if object_name.endswith("Dimension") and object_name.startswith("AcDb"):
+        return "DIMENSION"
+    return COM_TYPES.get(object_name)
 
 
 def wait_until_idle(state: Any, phase: str, timeout: float = 8.0, *, probe=None) -> Any:
@@ -69,10 +79,7 @@ def _com_inventory(document: Any) -> tuple[dict[str, dict[str, str]], set[str]]:
         entities = inventory.setdefault(name, {})
         for entity in layout.Block:
             object_name = entity.ObjectName
-            if object_name.endswith("Dimension") and object_name.startswith("AcDb"):
-                entity_type = "DIMENSION"
-            else:
-                entity_type = COM_TYPES.get(object_name)
+            entity_type = com_entity_type(object_name)
             if entity_type is None:
                 unchecked.add(object_name)
             else:
@@ -80,8 +87,7 @@ def _com_inventory(document: Any) -> tuple[dict[str, dict[str, str]], set[str]]:
     return inventory, unchecked
 
 
-def _verify_dxf(path: Path, document: Any, version: str) -> dict:
-    source, unchecked = _com_inventory(document)
+def _verify_dxf(path: Path, source: dict, unchecked: set[str], version: str) -> dict:
     output = ezdxf.readfile(path)
     target = {
         layout.name: {
@@ -105,13 +111,19 @@ def _verify_dxf(path: Path, document: Any, version: str) -> dict:
                     "expected_type": expected_type,
                     "actual_type": actual_type,
                 })
+    extra = [] if unchecked else [
+        {"layout": layout, "handle": handle, "type": kind}
+        for layout, entities in target.items() for handle, kind in entities.items()
+        if handle not in source.get(layout, {})
+    ]
     return {
-        "status": "failed" if missing or mismatched or output.dxfversion != version else "passed",
+        "status": "failed" if missing or mismatched or extra or output.dxfversion != version else "passed",
         "requested_version": version,
         "actual_version": output.dxfversion,
         "checked_entities": sum(map(len, source.values())),
         "missing": missing,
         "type_mismatches": mismatched,
+        "unexpected_entities": extra,
         "unchecked_source_types": sorted(unchecked),
         "scope": "Layout entity identity and type by handle. Block contents, external references, "
                  "entity properties, and table cell fidelity require separate validation.",
@@ -136,6 +148,7 @@ def export_saved_dwg(document: Any, app: Any, path: str, version: str) -> dict:
 
     state = app.GetAcadState()
     wait_until_idle(state, "before export")
+    inventory, unchecked = _com_inventory(document)
     active = app.ActiveDocument
     active_path = active.FullName
     with TemporaryDirectory(prefix=".cad-mcp-dxf-", dir=destination.parent) as stage_dir:
@@ -159,7 +172,7 @@ def export_saved_dwg(document: Any, app: Any, path: str, version: str) -> dict:
                     active.Activate()
                     wait_until_idle(state, "after restoring the active drawing", probe=lambda: app.Name)
 
-        report = _verify_dxf(exported, document, version)
+        report = _verify_dxf(exported, inventory, unchecked, version)
         if report["status"] == "passed":
             # Windows rename is atomic on the same volume and refuses existing files.
             # Link also refuses existing files on POSIX, used by offline tests.

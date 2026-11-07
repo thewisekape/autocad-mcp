@@ -74,7 +74,10 @@
         "id": {"type": "string", "minLength": 1},
         "view_type": {"enum": ["plan", "elevation", "section", "unknown"]},
         "members": {"type": "array", "items": {"$ref": "#/$defs/source"}},
-        "ambiguous": {"type": "boolean"}
+        "ambiguous": {"type": "boolean"},
+        "frame_evidence": {"enum": ["named_frame_reference", "explicit_frame_layer"]},
+        "classification_ambiguous": {"type": "boolean"},
+        "boundary_ambiguous": {"type": "boolean"}
       }
     },
     "relationship": {

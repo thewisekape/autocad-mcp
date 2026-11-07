@@ -18,6 +18,7 @@ from autocad_mcp.client import (
     get_backend,
 )
 from autocad_mcp.data_router import data_capabilities, read_cad_data
+from autocad_mcp.cad_document import export_cad_document
 
 # FastMCP validates return types via Pydantic. Tools that may return
 # ImageContent (screenshot) alongside TextContent need a union return type.
@@ -628,7 +629,7 @@ async def query(
       linetypes         — List all linetypes.
       block_tree        — Hierarchical block/nested block tree.
       tables            — Native table data (COM). data: {layout?, entity_id?}
-      view_regions      — Candidate DXF views on a frame layer. data: {frame_layer, layout?}
+      view_regions      — Named drawing frames, or rectangles on a selected layer. data: {frame_layer?, layout?}
       drawing_metadata  — Drawing metadata (author, dates, custom properties).
     """
     data = data or {}
@@ -665,10 +666,8 @@ async def query(
             entity_id=entity_id or data.get("entity_id"),
         )
     elif operation == "view_regions":
-        if not data.get("frame_layer"):
-            return _json({"error": "data.frame_layer is required"})
         result = await read_cad_data(
-            backend, "query.view_regions", data["frame_layer"], layout=data.get("layout"),
+            backend, "query.view_regions", data.get("frame_layer"), layout=data.get("layout"),
         )
     elif operation == "drawing_metadata":
         result = await backend.query_drawing_metadata()
@@ -738,8 +737,8 @@ async def search(
             if key not in data:
                 return _json({"error": f"data.{key} is required"})
         options = {key: data[key] for key in ("mode", "entity_type", "layer", "layout") if key in data}
-        if options and backend.name != "ezdxf":
-            return _json({"error": "Extended window options require the ezdxf backend"})
+        if options and backend.name not in ("ezdxf", "com"):
+            return _json({"error": "Extended window options require the ezdxf or COM backend"})
         result = await read_cad_data(
             backend, "search.by_window",
             data["x1"], data["y1"], data["x2"], data["y2"], **options,
@@ -749,8 +748,8 @@ async def search(
             if key not in data:
                 return _json({"error": f"data.{key} is required"})
         options = {key: data[key] for key in ("metric", "entity_type", "layer", "layout") if key in data}
-        if options and backend.name != "ezdxf":
-            return _json({"error": "Extended proximity options require the ezdxf backend"})
+        if options and backend.name not in ("ezdxf", "com"):
+            return _json({"error": "Extended proximity options require the ezdxf or COM backend"})
         result = await read_cad_data(
             backend, "search.by_proximity",
             data["x"], data["y"], data["radius"], **options,
@@ -868,8 +867,8 @@ async def geometry(
         eid = entity_id or data.get("entity_id")
         lyr = data.get("layer")
         options = {key: data[key] for key in ("entity_type", "layout") if key in data}
-        if options and backend.name != "ezdxf":
-            return _json({"error": "Extended bounding box options require the ezdxf backend"})
+        if options and backend.name not in ("ezdxf", "com"):
+            return _json({"error": "Extended bounding box options require the ezdxf or COM backend"})
         result = await read_cad_data(backend, "geometry.bounding_box", eid, lyr, **options)
     elif operation == "polyline_info":
         eid = entity_id or data.get("entity_id")
@@ -1052,7 +1051,7 @@ async def validate(
 # ==========================================================================
 
 
-@mcp.tool(annotations={"title": "Export & Reports", "readOnlyHint": True})
+@mcp.tool(annotations={"title": "Export & Reports", "readOnlyHint": False})
 @_safe("export")
 async def export(
     operation: str,
@@ -1062,7 +1061,7 @@ async def export(
     """Generate reports, BOMs, and extract structured data.
 
     Operations: entity_data, bom, data_extract, layer_report, block_count,
-    drawing_statistics
+    drawing_statistics, cad_document (data: {path?, frame_layer?}).
     """
     data = data or {}
     backend = await get_backend()
@@ -1070,6 +1069,8 @@ async def export(
     if operation == "entity_data":
         result = await backend.export_entity_data(
             layer=data.get("layer"), entity_type=data.get("entity_type"))
+    elif operation == "cad_document":
+        result = await export_cad_document(backend, path=data.get("path"), frame_layer=data.get("frame_layer"))
     elif operation == "bom":
         result = await backend.export_bom(data.get("block_names"))
     elif operation == "data_extract":

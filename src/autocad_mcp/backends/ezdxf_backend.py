@@ -1096,7 +1096,7 @@ class EzdxfBackend(AutoCADBackend):
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
 
-    async def query_view_regions(self, frame_layer, *, layout=None) -> CommandResult:
+    async def query_view_regions(self, frame_layer=None, *, layout=None) -> CommandResult:
         if not self._doc:
             return CommandResult(ok=False, error="No document open")
         try:

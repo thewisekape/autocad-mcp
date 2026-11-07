@@ -28,7 +28,7 @@ A unified MCP (Model Context Protocol) server for AutoCAD that combines three ba
 | 12 | `select` | filter, bulk_move, bulk_copy, bulk_erase, bulk_set_property, find_replace_text, find_replace_attribute, layer_rename, layer_merge | Bulk operations |
 | 13 | `modify` | set_property, set_text | Property changes |
 | 14 | `validate` | layer_standards, text_standards, orphaned_entities, attribute_completeness, connectivity, duplicates, zero_length, qc_report | QC checks |
-| 15 | `export` | entity_data, bom, data_extract, layer_report, block_count, drawing_statistics | Data export |
+| 15 | `export` | entity_data, bom, data_extract, layer_report, block_count, drawing_statistics, cad_document | Data export |
 | 16 | `xref` | list, attach, detach, reload, bind, path_update, query_entities | External references |
 | 17 | `layout` | list, create, switch, delete, viewport_create, viewport_set_scale, viewport_lock, page_setup, titleblock_fill, batch_plot | Layouts & viewports |
 | 18 | `electrical` | nec_lookup, voltage_drop, conduit_fill, load_calc, symbol_insert, circuit_trace, panel_schedule_gen, wire_number_assign | NEC calculations |
