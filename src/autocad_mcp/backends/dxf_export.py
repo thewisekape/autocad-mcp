@@ -158,12 +158,12 @@ def export_saved_dwg(document: Any, app: Any, path: str, version: str) -> dict:
         shutil.copyfile(source, source_copy)
         copied_document = app.Documents.Open(str(source_copy))
         try:
-            wait_until_idle(state, "after opening the export copy", probe=lambda: copied_document.FullName)
-            copied_document.SaveAs(str(exported), VERSIONS[version])
+            save_as = wait_until_idle(state, "after opening the export copy", probe=lambda: copied_document.SaveAs)
+            save_as(str(exported), VERSIONS[version])
         finally:
             try:
-                wait_until_idle(state, "before closing the export copy", probe=lambda: copied_document.FullName)
-                copied_document.Close(False)
+                close = wait_until_idle(state, "before closing the export copy", probe=lambda: copied_document.Close)
+                close(False)
             finally:
                 restored_path = wait_until_idle(
                     state, "after closing the export copy", probe=lambda: app.ActiveDocument.FullName,

@@ -14,8 +14,9 @@ from autocad_mcp.backends import dxf_spatial, dxf_view_regions
 from autocad_mcp.backends.annotation_data import extract_dxf_annotation
 from autocad_mcp.backends.base import AutoCADBackend, BackendCapabilities, CommandResult
 from autocad_mcp.backends.ezdxf_blocks import extract_block_tree
-from autocad_mcp.backends.ezdxf_geometry import extend_entity_geometry
+from autocad_mcp.backends.ezdxf_geometry import ellipse_length, extend_entity_geometry, polyline_area, polyline_segments
 from autocad_mcp.screenshot import MatplotlibScreenshotProvider
+from ezdxf.math import arc_angle_span_deg, ellipse_param_span
 
 log = structlog.get_logger()
 
@@ -911,10 +912,7 @@ class EzdxfBackend(AutoCADBackend):
                 geom["start_param"] = e.dxf.get("start_param", 0.0)
                 geom["end_param"] = e.dxf.get("end_param", math.tau)
             elif dtype == "LEADER":
-                try:
-                    geom["vertices"] = [list(v) for v in e.vertices]
-                except Exception:
-                    geom["vertices"] = []
+                geom["vertices"] = [list(v) for v in e.vertices]
                 geom["dimstyle"] = e.dxf.get("dimstyle", "Standard")
             elif dtype == "HATCH":
                 geom.update({
@@ -1183,101 +1181,48 @@ class EzdxfBackend(AutoCADBackend):
 
     async def geometry_length(self, entity_id) -> CommandResult:
         try:
-            e = self._doc.entitydb.get(entity_id)
-            if e is None:
+            entity = self._doc.entitydb.get(entity_id)
+            if entity is None:
                 return CommandResult(ok=False, error=f"Entity {entity_id} not found")
-            dtype = e.dxftype()
-            length = 0.0
-            if dtype == "LINE":
-                s = e.dxf.start
-                end = e.dxf.end
-                length = math.sqrt((end[0] - s[0]) ** 2 + (end[1] - s[1]) ** 2 + (end[2] - s[2]) ** 2)
-            elif dtype == "CIRCLE":
-                length = 2 * math.pi * e.dxf.radius
-            elif dtype == "ARC":
-                sa = math.radians(e.dxf.start_angle)
-                ea = math.radians(e.dxf.end_angle)
-                sweep = ea - sa
-                if sweep < 0:
-                    sweep += 2 * math.pi
-                length = abs(sweep) * e.dxf.radius
-            elif dtype == "LWPOLYLINE":
-                pts = list(e.get_points(format="xyseb"))
-                closed = e.closed
-                n = len(pts)
-                for i in range(n - 1):
-                    x1p, y1p = pts[i][0], pts[i][1]
-                    x2p, y2p = pts[i + 1][0], pts[i + 1][1]
-                    bulge = pts[i][4]
-                    length += self._segment_length(x1p, y1p, x2p, y2p, bulge)
-                if closed and n > 1:
-                    x1p, y1p = pts[-1][0], pts[-1][1]
-                    x2p, y2p = pts[0][0], pts[0][1]
-                    bulge = pts[-1][4]
-                    length += self._segment_length(x1p, y1p, x2p, y2p, bulge)
-            elif dtype == "POLYLINE":
-                verts = [v.dxf.location for v in e.vertices]
-                for i in range(len(verts) - 1):
-                    dx = verts[i + 1][0] - verts[i][0]
-                    dy = verts[i + 1][1] - verts[i][1]
-                    dz = verts[i + 1][2] - verts[i][2]
-                    length += math.sqrt(dx * dx + dy * dy + dz * dz)
-                if e.is_closed and len(verts) > 1:
-                    dx = verts[0][0] - verts[-1][0]
-                    dy = verts[0][1] - verts[-1][1]
-                    dz = verts[0][2] - verts[-1][2]
-                    length += math.sqrt(dx * dx + dy * dy + dz * dz)
-            elif dtype == "ELLIPSE":
-                # Approximate ellipse perimeter using Ramanujan's formula
-                a_len = math.sqrt(e.dxf.major_axis[0] ** 2 + e.dxf.major_axis[1] ** 2 + e.dxf.major_axis[2] ** 2)
-                b_len = a_len * e.dxf.ratio
-                h = ((a_len - b_len) / (a_len + b_len)) ** 2
-                length = math.pi * (a_len + b_len) * (1 + 3 * h / (10 + math.sqrt(4 - 3 * h)))
+            kind = entity.dxftype()
+            if kind == "LINE":
+                length = entity.dxf.start.distance(entity.dxf.end)
+            elif kind == "CIRCLE":
+                length = math.tau * entity.dxf.radius
+            elif kind == "ARC":
+                span = arc_angle_span_deg(entity.dxf.start_angle, entity.dxf.end_angle)
+                length = math.radians(span) * entity.dxf.radius
+            elif kind in ("LWPOLYLINE", "POLYLINE"):
+                length = math.fsum(polyline_segments(entity, self._segment_length))
+            elif kind == "ELLIPSE":
+                length = ellipse_length(entity)
             else:
-                return CommandResult(ok=False, error=f"Length not supported for {dtype}")
-
-            return CommandResult(ok=True, payload={"entity_type": dtype, "length": round(length, 10)})
+                return CommandResult(ok=False, error=f"Length not supported for {kind}")
+            payload = {"entity_type": kind, "length": round(length, 10)}
+            if kind == "ELLIPSE":
+                payload["approximate"] = True
+            return CommandResult(ok=True, payload=payload)
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
 
     async def geometry_area(self, entity_id) -> CommandResult:
         try:
-            e = self._doc.entitydb.get(entity_id)
-            if e is None:
+            entity = self._doc.entitydb.get(entity_id)
+            if entity is None:
                 return CommandResult(ok=False, error=f"Entity {entity_id} not found")
-            dtype = e.dxftype()
-            area = 0.0
-            if dtype == "CIRCLE":
-                area = math.pi * e.dxf.radius ** 2
-            elif dtype == "LWPOLYLINE":
-                if not e.closed:
-                    return CommandResult(ok=False, error="Polyline is not closed; area undefined")
-                # Shoelace formula (approximation for straight segments)
-                pts = list(e.get_points(format="xy"))
-                n = len(pts)
-                for i in range(n):
-                    j = (i + 1) % n
-                    area += pts[i][0] * pts[j][1]
-                    area -= pts[j][0] * pts[i][1]
-                area = abs(area) / 2.0
-            elif dtype == "POLYLINE":
-                if not e.is_closed:
-                    return CommandResult(ok=False, error="Polyline is not closed; area undefined")
-                verts = [(v.dxf.location[0], v.dxf.location[1]) for v in e.vertices]
-                n = len(verts)
-                for i in range(n):
-                    j = (i + 1) % n
-                    area += verts[i][0] * verts[j][1]
-                    area -= verts[j][0] * verts[i][1]
-                area = abs(area) / 2.0
-            elif dtype == "ELLIPSE":
-                a_len = math.sqrt(e.dxf.major_axis[0] ** 2 + e.dxf.major_axis[1] ** 2 + e.dxf.major_axis[2] ** 2)
-                b_len = a_len * e.dxf.ratio
-                area = math.pi * a_len * b_len
+            kind = entity.dxftype()
+            if kind == "CIRCLE":
+                area = math.pi * entity.dxf.radius ** 2
+            elif kind in ("LWPOLYLINE", "POLYLINE"):
+                area = polyline_area(entity)
+            elif kind == "ELLIPSE":
+                span = ellipse_param_span(entity.dxf.start_param, entity.dxf.end_param)
+                if not math.isclose(span, math.tau, abs_tol=1e-9):
+                    return CommandResult(ok=False, error="Area requires a full ellipse")
+                area = math.pi * entity.dxf.major_axis.magnitude_square * entity.dxf.ratio
             else:
-                return CommandResult(ok=False, error=f"Area not supported for {dtype}")
-
-            return CommandResult(ok=True, payload={"entity_type": dtype, "area": round(area, 10)})
+                return CommandResult(ok=False, error=f"Area not supported for {kind}")
+            return CommandResult(ok=True, payload={"entity_type": kind, "area": round(area, 10)})
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
 
@@ -1292,93 +1237,28 @@ class EzdxfBackend(AutoCADBackend):
 
     async def geometry_polyline_info(self, entity_id) -> CommandResult:
         try:
-            e = self._doc.entitydb.get(entity_id)
-            if e is None:
+            entity = self._doc.entitydb.get(entity_id)
+            if entity is None:
                 return CommandResult(ok=False, error=f"Entity {entity_id} not found")
-            dtype = e.dxftype()
-            if dtype == "LWPOLYLINE":
-                pts = list(e.get_points(format="xyseb"))
-                closed = e.closed
-                vertices = []
-                for pt in pts:
-                    vertices.append({"x": pt[0], "y": pt[1], "bulge": pt[4]})
-
-                # Segment lengths
-                n = len(pts)
-                segment_lengths = []
-                total_length = 0.0
-                count = n if closed else n - 1
-                for i in range(count):
-                    j = (i + 1) % n
-                    x1p, y1p = pts[i][0], pts[i][1]
-                    x2p, y2p = pts[j][0], pts[j][1]
-                    bulge = pts[i][4]
-                    seg_len = self._segment_length(x1p, y1p, x2p, y2p, bulge)
-                    segment_lengths.append(round(seg_len, 10))
-                    total_length += seg_len
-
-                result = {
-                    "entity_type": "LWPOLYLINE",
-                    "vertices": vertices,
-                    "vertex_count": n,
-                    "closed": closed,
-                    "segment_lengths": segment_lengths,
-                    "total_length": round(total_length, 10),
-                }
-
-                if closed and n >= 3:
-                    # Compute area using shoelace formula
-                    xy = [(pt[0], pt[1]) for pt in pts]
-                    area = 0.0
-                    for i in range(n):
-                        j = (i + 1) % n
-                        area += xy[i][0] * xy[j][1]
-                        area -= xy[j][0] * xy[i][1]
-                    result["area"] = round(abs(area) / 2.0, 10)
-
-                return CommandResult(ok=True, payload=result)
-
-            elif dtype == "POLYLINE":
-                verts = list(e.vertices)
-                closed = e.is_closed
-                vertices = [{"x": v.dxf.location[0], "y": v.dxf.location[1], "z": v.dxf.location[2]} for v in verts]
-
-                segment_lengths = []
-                total_length = 0.0
-                n = len(verts)
-                count = n if closed else n - 1
-                for i in range(count):
-                    j = (i + 1) % n
-                    loc_i = verts[i].dxf.location
-                    loc_j = verts[j].dxf.location
-                    dx = loc_j[0] - loc_i[0]
-                    dy = loc_j[1] - loc_i[1]
-                    dz = loc_j[2] - loc_i[2]
-                    seg_len = math.sqrt(dx * dx + dy * dy + dz * dz)
-                    segment_lengths.append(round(seg_len, 10))
-                    total_length += seg_len
-
-                result = {
-                    "entity_type": "POLYLINE",
-                    "vertices": vertices,
-                    "vertex_count": n,
-                    "closed": closed,
-                    "segment_lengths": segment_lengths,
-                    "total_length": round(total_length, 10),
-                }
-
-                if closed and n >= 3:
-                    coords = [(v.dxf.location[0], v.dxf.location[1]) for v in verts]
-                    area = 0.0
-                    for i in range(n):
-                        j = (i + 1) % n
-                        area += coords[i][0] * coords[j][1]
-                        area -= coords[j][0] * coords[i][1]
-                    result["area"] = round(abs(area) / 2.0, 10)
-
-                return CommandResult(ok=True, payload=result)
+            kind = entity.dxftype()
+            if kind == "LWPOLYLINE":
+                closed = entity.closed
+                vertices = [{"x": x, "y": y, "bulge": bulge} for x, y, bulge in entity.get_points("xyb")]
+                planar = True
+            elif kind == "POLYLINE":
+                closed = entity.is_closed
+                vertices = [{"x": v.dxf.location.x, "y": v.dxf.location.y, "z": v.dxf.location.z,
+                             "bulge": v.dxf.bulge if entity.is_2d_polyline else 0.0} for v in entity.vertices]
+                planar = entity.is_2d_polyline
             else:
-                return CommandResult(ok=False, error=f"Entity is {dtype}, not a polyline")
+                return CommandResult(ok=False, error=f"Entity is {kind}, not a polyline")
+            lengths = polyline_segments(entity, self._segment_length)
+            payload = {"entity_type": kind, "vertices": vertices, "vertex_count": len(vertices), "closed": closed,
+                       "segment_lengths": [round(length, 10) for length in lengths],
+                       "total_length": round(math.fsum(lengths), 10)}
+            if closed and planar and len(vertices) >= 2:
+                payload["area"] = round(polyline_area(entity), 10)
+            return CommandResult(ok=True, payload=payload)
         except Exception as ex:
             return CommandResult(ok=False, error=str(ex))
 

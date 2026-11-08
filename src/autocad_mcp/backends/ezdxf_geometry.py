@@ -4,9 +4,70 @@ import math
 
 from ezdxf import DXFError, bbox
 from ezdxf.entities import DXFGraphic
-from ezdxf.math import Vec3, arc_angle_span_deg
+from ezdxf.math import Vec3, arc_angle_span_deg, ellipse_param_span
 
 BOUNDED_TYPES = {"LINE", "ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE", "ELLIPSE", "SPLINE"}
+
+
+def polyline_segments(entity, segment_length):
+    if entity.dxftype() == "LWPOLYLINE":
+        points = [Vec3(x, y, 0) for x, y in entity.vertices()]
+        bulges = [value for (value,) in entity.get_points("b")]
+        closed = entity.closed
+    elif entity.is_2d_polyline or entity.is_3d_polyline:
+        if entity.dxf.flags & 6:
+            raise ValueError("Curve-fit POLYLINE segment measurements are unavailable")
+        points = list(entity.points())
+        bulges = [vertex.dxf.bulge if entity.is_2d_polyline else 0.0 for vertex in entity.vertices]
+        closed = entity.is_closed
+    else:
+        raise ValueError("Mesh POLYLINE segment measurements are unavailable")
+    following = points[1:] + points[:1] if closed and len(points) > 1 else points[1:]
+    return [segment_length(p.x, p.y, q.x, q.y, bulge) if bulge else p.distance(q)
+            for p, q, bulge in zip(points, following, bulges)]
+
+
+def polyline_area(entity):
+    if entity.dxftype() == "LWPOLYLINE":
+        if not entity.closed:
+            raise ValueError("Polyline is not closed; area undefined")
+        vertices = list(entity.get_points("xyb"))
+    else:
+        if not entity.is_2d_polyline or entity.dxf.flags & 6:
+            raise ValueError("Area requires a planar, non-curve-fit POLYLINE")
+        if not entity.is_closed:
+            raise ValueError("Polyline is not closed; area undefined")
+        vertices = [(v.dxf.location.x, v.dxf.location.y, v.dxf.bulge) for v in entity.vertices]
+    if len(vertices) < 2:
+        return 0.0
+    ox, oy, _ = vertices[0]
+    terms = []
+    for (x1, y1, bulge), (x2, y2, _) in zip(vertices, vertices[1:] + vertices[:1]):
+        terms.append(((x1 - ox) * (y2 - oy) - (y1 - oy) * (x2 - ox)) / 2)
+        if bulge:
+            chord2 = (x2 - x1) ** 2 + (y2 - y1) ** 2
+            if abs(bulge) < 1e-5:
+                terms.append(chord2 * bulge / 3)
+            else:
+                angle = 4 * math.atan(bulge)
+                radius2 = chord2 * (bulge + 1 / bulge) ** 2 / 16
+                terms.append(radius2 * (angle - math.sin(angle)) / 2)
+    return abs(math.fsum(terms))
+
+
+def ellipse_length(entity):
+    start = entity.dxf.start_param
+    span = ellipse_param_span(start, entity.dxf.end_param)
+    major = entity.dxf.major_axis.magnitude
+    minor = major * entity.dxf.ratio
+    steps = 512
+    step = span / steps
+
+    def speed(parameter):
+        return math.hypot(major * math.sin(parameter), minor * math.cos(parameter))
+
+    interior = math.fsum((4 if i % 2 else 2) * speed(start + i * step) for i in range(1, steps))
+    return step / 3 * (speed(start) + interior + speed(start + span))
 
 
 def _polyline_length(points, bulges, closed, segment_length):

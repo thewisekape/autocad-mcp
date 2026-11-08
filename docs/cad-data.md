@@ -21,9 +21,11 @@ For the marked COM reads, the server converts a temporary copy of the saved DWG.
 ## Coordinate and query definitions
 
 - DXF block trees preserve `blocks` and add layout reference trees. Matrix rows use row vectors with translation in the last row. Instance paths distinguish repeated inserts. A plain handle lookup in a block definition returns definition-local geometry and a diagnostic when an instance path is required for WCS.
+- DXF `geometry.length`, `geometry.area`, and `geometry.polyline_info` account for bulges in lightweight and legacy planar polylines. Area requires a closed, planar boundary. Ellipse length uses the actual parameter range and is marked approximate. Ellipse area requires a full ellipse.
 - COM and DXF spatial queries scan top-level entities. Window queries support containment and intersection with inclusive XY boundaries. Proximity queries support distance to the box center or nearest point. The options include entity type, layer and layout. Model is the default layout. COM uses native WCS bounds and retries busy calls briefly. Some DXF bounds, especially for text and curves, are approximate. [AutoCAD GetBoundingBox reference](https://help.autodesk.com/cloudhelp/2025/CHS/AutoCAD-LT-ActiveX-Reference/files/GUID-A20C361C-BBF0-4EAB-8BE7-709154CEEE09.htm)
 - Query view regions with an optional layout and frame layer. The default finds named drawing-frame blocks and uses explicit titles. A specified layer selects closed rectangular polylines. Insufficient or conflicting titles yield unknown. Title ambiguity and cross-boundary membership are reported separately.
 - The cad_document export operation emits [CADDocument v1](cad-document.v1.schema.json). Pass a new JSON path in data.path to write a file, or omit it to return the document. The document includes layout and block-definition entities, instance paths, dimensions, annotations, tables, views and relationships. COM supplies native table cells. Direct DXF reads provide best-effort cell strings.
+- View records include the frame source, XY bounds, title Handles, and each member's boundary relationship. A sheet with both elevation and section titles carries both pieces of evidence and stays ambiguous at sheet level. Dimension records carry a partial status when rendered display text is unavailable.
 
 ## Codex MCP configuration
 

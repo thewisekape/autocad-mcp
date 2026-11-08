@@ -25,10 +25,13 @@ _TITLE_TYPES = {
     "section view": "section",
     "剖面图": "section",
     "剖视图": "section",
+    "横剖图": "section",
+    "纵剖图": "section",
+    "侧剖图": "section",
 }
 
 _FRAME_NAME = re.compile(r"图框|(?:^|[^a-z])(?:title[ _-]*block|sheet[ _-]*(?:frame|border)|drawing[ _-]*border)(?:$|[^a-z])", re.I)
-_TITLE_SUFFIX = re.compile(r"(平面图|俯视图|立面图|正视图|侧视图|剖面图|剖视图)$")
+_TITLE_SUFFIX = re.compile(r"(平面图|俯视图|立面图|正视图|侧视图|剖面图|剖视图|横剖图|纵剖图|侧剖图)$")
 
 
 def _frame_bounds(entity):

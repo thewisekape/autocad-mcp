@@ -73,13 +73,23 @@
       "properties": {
         "id": {"type": "string", "minLength": 1},
         "view_type": {"enum": ["plan", "elevation", "section", "unknown"]},
-        "members": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+        "members": {"type": "array", "items": {"allOf": [{"$ref": "#/$defs/source"}], "properties": {
+          "relation": {"enum": ["contained", "crosses_boundary"]}, "ambiguous": {"type": "boolean"}
+        }}},
+        "frame": {"$ref": "#/$defs/source"},
+        "bbox_min": {"$ref": "#/$defs/xy"},
+        "bbox_max": {"$ref": "#/$defs/xy"},
+        "titles": {"type": "array", "items": {"type": "object", "required": ["source", "text", "view_type"], "properties": {
+          "source": {"$ref": "#/$defs/source"}, "text": {"type": "string"},
+          "view_type": {"enum": ["plan", "elevation", "section"]}
+        }}},
         "ambiguous": {"type": "boolean"},
         "frame_evidence": {"enum": ["named_frame_reference", "explicit_frame_layer"]},
         "classification_ambiguous": {"type": "boolean"},
         "boundary_ambiguous": {"type": "boolean"}
       }
     },
+    "xy": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
     "relationship": {
       "allOf": [{"$ref": "#/$defs/observation"}],
       "type": "object",

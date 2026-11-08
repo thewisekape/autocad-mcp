@@ -76,11 +76,13 @@ async def build_document(backend, file, method, native_tables=None, frame_layer=
                 record = entity_record(source, kind, layer, coordinate_system, data, "autocad_com" if native is not None else method, warnings)
                 output["tables"].append(record)
             else:
-                record = entity_record(source, kind, layer, coordinate_system, data, method, warnings)
                 annotation = data.get("annotation")
-                if kind == "DIMENSION" and annotation:
-                    record["measurement"] = annotation.get("measurement")
-                    record["display_text"] = annotation.get("display_value")
+                if annotation:
+                    warnings.extend(annotation.get("warnings", ()))
+                record = entity_record(source, kind, layer, coordinate_system, data, method, warnings)
+                if kind == "DIMENSION":
+                    record["measurement"] = (annotation or {}).get("measurement")
+                    record["display_text"] = (annotation or {}).get("display_value")
                     output["dimensions"].append(record)
                 elif kind in ("TEXT", "MTEXT"):
                     output["annotations"].append(record)
@@ -119,8 +121,13 @@ async def build_document(backend, file, method, native_tables=None, frame_layer=
             output.setdefault("warnings", []).append(views.error)
             continue
         for region in views.payload["regions"]:
-            members = [source_ref(path, item["handle"], layout.name) for item in region["members"]]
+            members = [{**source_ref(path, item["handle"], layout.name),
+                        "relation": item["relation"], "ambiguous": item["ambiguous"]} for item in region["members"]]
             output["views"].append({"id": f"{layout.name}/{region['frame_handle']}", "view_type": region["view_type"],
+                                    "frame": source_ref(path, region["frame_handle"], layout.name),
+                                    "bbox_min": region["bbox_min"], "bbox_max": region["bbox_max"],
+                                    "titles": [{**title, "source": source_ref(path, title["handle"], layout.name)}
+                                               for title in region["titles"]],
                                     "members": members, "ambiguous": region["ambiguous"],
                                     "frame_evidence": region["frame_evidence"],
                                     "classification_ambiguous": region["classification_ambiguous"],
